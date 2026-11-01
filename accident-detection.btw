@@ -1,0 +1,219 @@
+%BTW 1
+;; BenchTwin project file. Open it in BenchTwin (benchtwin.com): Share / Import, or drag it onto the bench.
+;; Holds the circuit, the code and the 3D models. Units: millimetres and degrees.
+
+@PROJECT name="accident detection" app="3.64.8" saved="2026-11-01T12:19:02.921Z" bench="508x355.6" next=93
+@PART u80 mpu6050 x=53 z=-26 rot=0 label="IMU 1"
+  +set tilt=0 g=1
+@PART u81 m-neo6m x=83 z=21 rot=3 label="MOD 1"
+@PART u82 m-sim800l x=56 z=3 rot=2 label="MOD 2"
+@PART u83 btn x=15 z=-2 rot=0 label="Button 1"
+  +set macro="Enter"
+@PART u84 led x=2 z=-15 rot=2 label="LED 1" sku="led-5mm-diffused-red"
+  +set color="red" behavior="connected"
+@PART u85 buzzer x=31 z=-21 rot=0 label="Buzzer 1"
+@PART u86 uno x=18 z=48 rot=3 label="Uno 1"
+  +set power="usb"
+@PART u87 bb-170-white x=73 z=61 rot=0 label="BB1"
+@BODY u88 shape-box x=37 z=24 rot=0 label="Box 1"
+  +set cut=no arrN=1 arrGap=2 arrAxis="x" mirX=no mirOff=0 smooth=no sides=6
+  +set points=5 twist=0 taper=100 bend=0 turns=5 wire=1.2 mat="pla" rotX=0
+  +set rotZ=0 w=120 d=120 h=7 y=0 rotDeg=0 color="#d8a23a" ghost=no
+  +set wall=2 radius=3 hole=3.2 collide=yes
+@PART u90 res x=57 z=25 rot=0 label="R1" sku="res-cf14-2k"
+  +set ohms=2000
+@PART u92 res x=-5 z=3 rot=3 label="R3" sku="res-cf14-220r"
+  +set ohms=220 lift=1.5
+@WIRE from="u86|5V" to="u87|j1"
+@WIRE from="u81|VCC" to="u87|i1"
+@WIRE from="u80|VCC" to="u87|h1"
+@WIRE from="u86|GND" to="u87|j6"
+@WIRE from="u81|GND" to="u87|i6"
+@WIRE from="u80|GND" to="u87|h6"
+@WIRE from="u82|GND" to="u87|f6"
+@WIRE from="u82|VCC" to="u87|g1"
+@WIRE from="u86|A4" to="u80|SDA"
+@WIRE from="u80|SCL" to="u86|A5"
+@WIRE from="u82|TXD" to="u86|D7"
+@WIRE from="u82|RXD" to="u90|2"
+@WIRE from="u90|1" to="u86|D8"
+@WIRE from="u81|RX" to="u86|D3"
+@WIRE from="u81|TX" to="u86|D4"
+@WIRE from="u83|1#2" to="u87|g6"
+@WIRE from="u85|+" to="u86|D6"
+@WIRE from="u85|−" to="u86|GND"
+@WIRE from="u87|f6" to="u84|K"
+@WIRE from="u84|A" to="u92|2"
+@WIRE from="u92|1" to="u86|D5"
+@WIRE from="u83|2#2" to="u86|D2"
+@CODE lang=arduino lines=169
+| /*
+|   Accident Detection + SMS Alert  (BenchTwin version)
+| 
+|   MPU6050  SDA->A4  SCL->A5
+|   GPS TX   -> D4 (Arduino RX)   GPS RX  <- D3
+|   SIM800L  TX -> D7 (Arduino RX)  RX <- D8
+|   Button D2 (to GND) | LED D5 | Buzzer D6
+| 
+|   IMU_MODE 0 = safe mode, no sensor library. Type 'c' in the Serial monitor
+|                to fake a crash. Always compiles in BenchTwin.
+|   IMU_MODE 1 = read the MPU6050 with getAcceleration() (no Vector type)
+| */
+| 
+| #define IMU_MODE 0
+| #define SIMULATION 1
+| 
+| #include <Wire.h>
+| #include <SoftwareSerial.h>
+| #include <TinyGPS++.h>
+| #if IMU_MODE
+| #include <MPU6050.h>
+| #endif
+| 
+| const char PHONE[] = "+91XXXXXXXXXX";
+| const float IMPACT_G = 2.5;
+| const float ROLLOVER_DEG = 60.0;
+| const unsigned long ROLLOVER_MS = 2000;
+| const unsigned long CANCEL_WINDOW_MS = 10000;
+| const unsigned long COOLDOWN_MS = 30000;
+| 
+| const uint8_t BTN = 2, LED = 5, BUZ = 6;
+| 
+| SoftwareSerial gpsSerial(4, 3);   // RX, TX
+| SoftwareSerial gsm(7, 8);         // RX, TX
+| TinyGPSPlus gps;
+| #if IMU_MODE
+| MPU6050 mpu;
+| #endif
+| 
+| unsigned long rolloverStart = 0;
+| 
+| bool crashDetected() {
+| #if IMU_MODE
+|   int16_t rx = 0, ry = 0, rz = 16384;
+|   mpu.getAcceleration(&rx, &ry, &rz);
+|   float ax = rx / 16384.0;
+|   float ay = ry / 16384.0;
+|   float az = rz / 16384.0;
+| 
+|   float mag = sqrt(ax * ax + ay * ay + az * az);
+|   if (mag >= IMPACT_G) return true;
+| 
+|   float tilt = acos(constrain(az / (mag + 0.0001), -1.0, 1.0)) * 180.0 / PI;
+|   if (tilt > ROLLOVER_DEG) {
+|     if (rolloverStart == 0) rolloverStart = millis();
+|     if (millis() - rolloverStart > ROLLOVER_MS) return true;
+|   } else {
+|     rolloverStart = 0;
+|   }
+|   return false;
+| #else
+|   while (Serial.available()) {
+|     if (Serial.read() == 'c') return true;
+|   }
+|   return false;
+| #endif
+| }
+| 
+| bool waitForCancel() {
+|   unsigned long start = millis();
+|   while (millis() - start < CANCEL_WINDOW_MS) {
+|     bool on = ((millis() / 250) % 2) == 0;
+|     digitalWrite(LED, on);
+|     digitalWrite(BUZ, on);
+|     if (digitalRead(BTN) == LOW) {
+|       delay(30);
+|       if (digitalRead(BTN) == LOW) {
+|         digitalWrite(LED, LOW);
+|         digitalWrite(BUZ, LOW);
+|         return true;
+|       }
+|     }
+|   }
+|   digitalWrite(LED, HIGH);
+|   digitalWrite(BUZ, HIGH);
+|   return false;
+| }
+| 
+| bool getLocation(double &lat, double &lon) {
+|   gpsSerial.listen();
+|   unsigned long start = millis();
+|   while (millis() - start < 3000) {
+|     while (gpsSerial.available()) gps.encode(gpsSerial.read());
+|   }
+|   if (gps.location.isValid()) {
+|     lat = gps.location.lat();
+|     lon = gps.location.lng();
+|     return true;
+|   }
+| #if SIMULATION
+|   lat = 17.3850;
+|   lon = 78.4867;
+|   return true;
+| #else
+|   return false;
+| #endif
+| }
+| 
+| void gsmCmd(const char *cmd, unsigned long waitMs = 1000) {
+|   gsm.println(cmd);
+|   unsigned long t = millis();
+|   while (millis() - t < waitMs) {
+|     while (gsm.available()) Serial.write(gsm.read());
+|   }
+| }
+| 
+| void sendSMS(double lat, double lon, bool haveFix) {
+|   gsm.listen();
+|   gsmCmd("AT");
+|   gsmCmd("AT+CMGF=1");
+|   gsm.print("AT+CMGS=\"");
+|   gsm.print(PHONE);
+|   gsm.println("\"");
+|   delay(1000);
+|   gsm.print("ACCIDENT DETECTED! ");
+|   if (haveFix) {
+|     gsm.print("Location: https://maps.google.com/?q=");
+|     gsm.print(lat, 6);
+|     gsm.print(",");
+|     gsm.print(lon, 6);
+|   } else {
+|     gsm.print("GPS location unavailable.");
+|   }
+|   gsm.write(26);
+|   delay(5000);
+|   Serial.println(F("SMS sent"));
+| }
+| 
+| void setup() {
+|   Serial.begin(9600);
+|   gpsSerial.begin(9600);
+|   gsm.begin(9600);
+|   pinMode(BTN, INPUT_PULLUP);
+|   pinMode(LED, OUTPUT);
+|   pinMode(BUZ, OUTPUT);
+| 
+| #if IMU_MODE
+|   Wire.begin();
+| #endif
+|   Serial.println(F("Accident detection ready. Send 'c' to simulate a crash."));
+| }
+| 
+| void loop() {
+|   if (crashDetected()) {
+|     Serial.println(F("Crash detected - waiting for cancel"));
+|     if (waitForCancel()) {
+|       Serial.println(F("Cancelled by user"));
+|     } else {
+|       double lat = 0, lon = 0;
+|       bool fix = getLocation(lat, lon);
+|       sendSMS(lat, lon, fix);
+|       digitalWrite(LED, LOW);
+|       digitalWrite(BUZ, LOW);
+|     }
+|     rolloverStart = 0;
+|     delay(COOLDOWN_MS);
+|   }
+|   delay(20);
+| }
+@END parts=11 wires=22 crc32=A93FC16A
